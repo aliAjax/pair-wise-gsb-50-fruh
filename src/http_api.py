@@ -12,9 +12,11 @@ from .domain import Actor, DomainError, PermissionDenied, ValidationError
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
+PACK_RE = re.compile(r"^/api/records/(\d+)/archive$")
+DOSSIER_RE = re.compile(r"^/api/archive/dossiers/(\d+)/(borrow|return|repair)$")
 
 
-def make_handler(service: Any, static_dir: Path):
+def make_handler(service: Any, static_dir: Path, archive_service: Any = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "tax-audit/1.0"
 
@@ -55,11 +57,52 @@ def make_handler(service: Any, static_dir: Path):
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_page(self, name: str) -> None:
+            page = (static_dir / name).read_bytes()
+            self._send(200, page, "text/html; charset=utf-8")
+
         def _handle_error(self, exc: Exception) -> None:
             if isinstance(exc, DomainError):
                 self._send(exc.status, {"error": exc.code, "message": str(exc)})
             else:
                 self._send(500, {"error": "internal_error", "message": "服务内部错误"})
+
+        def _archive_get(self, path: str, query: Dict[str, str]) -> bool:
+            if path == "/api/archive/boxes":
+                self._send(200, {"items": archive_service.list_boxes(self._actor())})
+                return True
+            if path == "/api/archive/dossiers":
+                status = query.get("status", [None])[0]
+                self._send(200, {"items": archive_service.list_dossiers(self._actor(), status=status)})
+                return True
+            if path == "/api/archive/loans":
+                active_only = query.get("active", ["0"])[0] in {"1", "true", "yes"}
+                self._send(200, {"items": archive_service.list_loans(self._actor(), active_only=active_only)})
+                return True
+            if path == "/api/archive/repairs":
+                pending_only = query.get("pending", ["0"])[0] in {"1", "true", "yes"}
+                self._send(200, {"items": archive_service.list_repairs(self._actor(), pending_only=pending_only)})
+                return True
+            if path == "/api/archive/stats":
+                self._send(200, archive_service.stats(self._actor()))
+                return True
+            return False
+
+        def _archive_post(self, path: str, body: Dict[str, Any]):
+            if path == "/api/archive/boxes":
+                return 201, archive_service.create_box(self._actor(), body.get("data", {}))
+            match = DOSSIER_RE.match(path)
+            if match:
+                dossier_id = int(match.group(1))
+                action = match.group(2)
+                data = body.get("data", {})
+                if action == "borrow":
+                    return 201, archive_service.borrow(self._actor(), dossier_id, data)
+                if action == "return":
+                    return 200, archive_service.return_dossier(self._actor(), dossier_id, data)
+                if action == "repair":
+                    return 200, archive_service.complete_repair(self._actor(), dossier_id, data)
+            return None
 
         def do_GET(self) -> None:
             try:
@@ -68,8 +111,18 @@ def make_handler(service: Any, static_dir: Path):
                     self._send(200, {"status": "ok", "service": "tax-audit", "database": service.repository.health()})
                     return
                 if parsed.path == "/":
-                    page = (static_dir / "index.html").read_bytes()
-                    self._send(200, page, "text/html; charset=utf-8")
+                    self._send_page("index.html")
+                    return
+                if parsed.path == "/archive":
+                    self._send_page("archive.html")
+                    return
+                if parsed.path.startswith("/api/archive"):
+                    if archive_service is None:
+                        raise PermissionDenied("归档服务未启用")
+                    query = parse_qs(parsed.query)
+                    if self._archive_get(parsed.path, query):
+                        return
+                    self._send(404, {"error": "not_found", "message": "路径不存在"})
                     return
                 if parsed.path == "/api/records":
                     query = parse_qs(parsed.query)
@@ -95,6 +148,21 @@ def make_handler(service: Any, static_dir: Path):
             try:
                 parsed = urlparse(self.path)
                 body = self._body()
+                if parsed.path.startswith("/api/archive"):
+                    if archive_service is None:
+                        raise PermissionDenied("归档服务未启用")
+                    result = self._archive_post(parsed.path, body)
+                    if result is None:
+                        self._send(404, {"error": "not_found", "message": "路径不存在"})
+                    else:
+                        self._send(result[0], result[1])
+                    return
+                pack_match = PACK_RE.match(parsed.path)
+                if pack_match:
+                    if archive_service is None:
+                        raise PermissionDenied("归档服务未启用")
+                    self._send(201, archive_service.pack(self._actor(), int(pack_match.group(1)), body.get("data", {})))
+                    return
                 if parsed.path == "/api/records":
                     record = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
                     self._send(201, record)
@@ -114,5 +182,5 @@ def make_handler(service: Any, static_dir: Path):
     return Handler
 
 
-def create_server(host: str, port: int, service: Any, static_dir: Path) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), make_handler(service, static_dir))
+def create_server(host: str, port: int, service: Any, static_dir: Path, archive_service: Any = None) -> ThreadingHTTPServer:
+    return ThreadingHTTPServer((host, port), make_handler(service, static_dir, archive_service))
