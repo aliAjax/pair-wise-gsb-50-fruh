@@ -17,6 +17,7 @@ class DomainRules:
         all_roles = set(CREATE_ROLES)
         for roles in ACTION_ROLES.values():
             all_roles.update(roles)
+        all_roles.add("archivist")
         return role == "admin" or role in all_roles
 
     def role_can_create(self, role: str) -> bool:

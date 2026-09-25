@@ -12,9 +12,16 @@ from .domain import Actor, DomainError, PermissionDenied, ValidationError
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
+ARCHIVE_DOSSIER_RE = re.compile(r"^/api/archive/dossiers/(\d+)$")
+ARCHIVE_DOSSIER_ACTION_RE = re.compile(r"^/api/archive/dossiers/(\d+)/actions/(borrow|return)$")
+ARCHIVE_REPAIR_ACTION_RE = re.compile(r"^/api/archive/repairs/(\d+)/actions/complete$")
 
 
-def make_handler(service: Any, static_dir: Path):
+def _flag(query: Dict[str, Any], key: str) -> bool:
+    return query.get(key, ["0"])[0] in {"1", "true"}
+
+
+def make_handler(service: Any, static_dir: Path, archive: Any = None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "tax-audit/1.0"
 
@@ -71,6 +78,10 @@ def make_handler(service: Any, static_dir: Path):
                     page = (static_dir / "index.html").read_bytes()
                     self._send(200, page, "text/html; charset=utf-8")
                     return
+                if parsed.path == "/archive":
+                    page = (static_dir / "archive.html").read_bytes()
+                    self._send(200, page, "text/html; charset=utf-8")
+                    return
                 if parsed.path == "/api/records":
                     query = parse_qs(parsed.query)
                     records = service.list_records(self._actor(), state=query.get("state", [None])[0], limit=int(query.get("limit", ["100"])[0]))
@@ -87,6 +98,24 @@ def make_handler(service: Any, static_dir: Path):
                 if parsed.path == "/api/stats":
                     self._send(200, service.stats(self._actor()))
                     return
+                if archive is not None:
+                    query = parse_qs(parsed.query)
+                    if parsed.path == "/api/archive/boxes":
+                        self._send(200, {"items": archive.list_boxes(self._actor())})
+                        return
+                    if parsed.path == "/api/archive/dossiers":
+                        self._send(200, {"items": archive.list_dossiers(self._actor(), status=query.get("status", [None])[0], overdue_only=_flag(query, "overdue"))})
+                        return
+                    match = ARCHIVE_DOSSIER_RE.match(parsed.path)
+                    if match:
+                        self._send(200, archive.get_dossier(self._actor(), int(match.group(1))))
+                        return
+                    if parsed.path == "/api/archive/loans":
+                        self._send(200, {"items": archive.list_loans(self._actor(), active_only=_flag(query, "active"), overdue_only=_flag(query, "overdue"))})
+                        return
+                    if parsed.path == "/api/archive/repairs":
+                        self._send(200, {"items": archive.list_repairs(self._actor(), status=query.get("status", [None])[0])})
+                        return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:
                 self._handle_error(exc)
@@ -107,6 +136,25 @@ def make_handler(service: Any, static_dir: Path):
                     record = service.act(self._actor(), int(match.group(1)), version, match.group(2), body.get("data", {}))
                     self._send(200, record)
                     return
+                if archive is not None:
+                    if parsed.path == "/api/archive/boxes":
+                        self._send(201, archive.create_box(self._actor(), body.get("data", {})))
+                        return
+                    if parsed.path == "/api/archive/dossiers":
+                        self._send(201, archive.archive_record(self._actor(), body.get("data", {})))
+                        return
+                    match = ARCHIVE_DOSSIER_ACTION_RE.match(parsed.path)
+                    if match:
+                        dossier_id = int(match.group(1))
+                        if match.group(2) == "borrow":
+                            self._send(201, archive.borrow(self._actor(), dossier_id, body.get("data", {})))
+                        else:
+                            self._send(200, archive.return_dossier(self._actor(), dossier_id, body.get("data", {})))
+                        return
+                    match = ARCHIVE_REPAIR_ACTION_RE.match(parsed.path)
+                    if match:
+                        self._send(200, archive.complete_repair(self._actor(), int(match.group(1)), body.get("data", {})))
+                        return
                 self._send(404, {"error": "not_found", "message": "路径不存在"})
             except Exception as exc:
                 self._handle_error(exc)
@@ -114,5 +162,5 @@ def make_handler(service: Any, static_dir: Path):
     return Handler
 
 
-def create_server(host: str, port: int, service: Any, static_dir: Path) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), make_handler(service, static_dir))
+def create_server(host: str, port: int, service: Any, static_dir: Path, archive: Any = None) -> ThreadingHTTPServer:
+    return ThreadingHTTPServer((host, port), make_handler(service, static_dir, archive))

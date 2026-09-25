@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>结案卷宗归档与借阅</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
+    main { max-width: 1080px; margin: auto; }
+    button { padding: .45rem .8rem; cursor: pointer; }
+    input, select { padding: .4rem; }
+    table { border-collapse: collapse; width: 100%; margin: .6rem 0 1.2rem; }
+    th, td { border: 1px solid #d5dbe1; padding: .4rem .55rem; text-align: left; font-size: .92rem; }
+    th { background: #f4f6f8; }
+    section { margin-bottom: 1.8rem; }
+    .row { display: flex; gap: .6rem; align-items: center; flex-wrap: wrap; margin: .5rem 0; }
+    .badge { padding: .1rem .45rem; border-radius: 4px; font-size: .8rem; background: #e2e8ee; }
+    .badge-overdue { background: #c0392b; color: #fff; }
+    tr.overdue { background: #fdecea; }
+    .hint { color: #5b6a77; font-size: .85rem; }
+    #output { background: #f4f6f8; padding: .8rem; border-radius: 8px; white-space: pre-wrap; min-height: 2.5rem; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>结案卷宗归档与借阅</h1>
+  <p><a href="/">返回稽查流程</a><span class="hint">　逾期未还的卷宗会以红色标出。</span></p>
+  <div class="row">
+    <label>用户 <input id="user" value="demo-archivist"></label>
+    <label>角色
+      <select id="role">
+        <option value="archivist">archivist 档案员</option>
+        <option value="reviewer">reviewer 复核</option>
+        <option value="admin">admin</option>
+        <option value="inspector">inspector 稽查</option>
+      </select>
+    </label>
+    <button id="reload">刷新全部</button>
+  </div>
+
+  <section>
+    <h2>档案盒</h2>
+    <div class="row">
+      <input id="boxNo" placeholder="盒号 如 BOX-001">
+      <input id="shelf" placeholder="架位 如 A-3-2">
+      <input id="capacity" type="number" min="1" placeholder="容量页数" style="width:7rem">
+      <button id="createBox">建盒</button>
+      <span class="hint">盒号唯一，盒内卷宗页数不得超过容量。</span>
+    </div>
+    <table id="boxes"><thead><tr><th>ID</th><th>盒号</th><th>架位</th><th>已用/容量(页)</th><th>卷数</th></tr></thead><tbody></tbody></table>
+  </section>
+
+  <section>
+    <h2>案件归档</h2>
+    <div class="row">
+      <input id="recId" type="number" min="1" placeholder="结案案件ID" style="width:8rem">
+      <input id="boxId" type="number" min="1" placeholder="档案盒ID" style="width:7rem">
+      <input id="pages" type="number" min="1" placeholder="卷宗页数" style="width:7rem">
+      <button id="archiveCase">装盒归档</button>
+      <span class="hint">仅已结案案件可归档，每案唯一一盒。</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>卷宗</h2>
+    <div class="row"><label><input id="onlyOverdue" type="checkbox"> 只看逾期</label></div>
+    <table id="dossiers"><thead><tr><th>ID</th><th>案件</th><th>盒号</th><th>架位</th><th>页数</th><th>状态</th><th>借阅人</th><th>用途</th><th>归还日</th><th>标记</th></tr></thead><tbody></tbody></table>
+    <div class="row">
+      <input id="borrowId" type="number" min="1" placeholder="卷宗ID" style="width:6rem">
+      <input id="purpose" placeholder="借阅用途">
+      <input id="due" type="date">
+      <button id="borrow">借卷</button>
+      <span class="hint">需 reviewer 角色，同一卷归还前不能再借。</span>
+    </div>
+    <div class="row">
+      <input id="returnId" type="number" min="1" placeholder="卷宗ID" style="width:6rem">
+      <input id="missing" type="number" min="0" value="0" placeholder="缺页数" style="width:6rem">
+      <button id="returnBack">还卷</button>
+      <span class="hint">缺页大于0自动转修补待办。</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>修补待办</h2>
+    <table id="repairs"><thead><tr><th>ID</th><th>卷宗</th><th>案件</th><th>盒号</th><th>缺页</th><th>状态</th><th>操作</th></tr></thead><tbody></tbody></table>
+  </section>
+
+  <pre id="output">操作结果显示在这里。</pre>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const STATUS = {available: "在架", borrowed: "借出", repair: "修补中"};
+const REPAIR_STATUS = {pending: "待修补", done: "已补齐"};
+
+function headers() {
+  return {"Content-Type": "application/json", "X-User-Id": $("user").value.trim(), "X-Role": $("role").value, "X-Org": "demo"};
+}
+function show(data) {
+  $("output").textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+}
+async function api(path, options) {
+  const response = await fetch(path, Object.assign({headers: headers()}, options || {}));
+  const data = await response.json();
+  if (!response.ok) { show(data); throw new Error(data.message || response.status); }
+  return data;
+}
+function post(path, data) {
+  return api(path, {method: "POST", body: JSON.stringify({data})});
+}
+function badge(text, cls) {
+  const span = document.createElement("span");
+  span.className = "badge " + (cls || "");
+  span.textContent = text;
+  return span;
+}
+function row(tbody, cells, className) {
+  const tr = document.createElement("tr");
+  if (className) tr.className = className;
+  for (const value of cells) {
+    const td = document.createElement("td");
+    if (value instanceof Node) td.appendChild(value); else td.textContent = value;
+    tr.appendChild(td);
+  }
+  tbody.appendChild(tr);
+}
+
+async function loadBoxes() {
+  const data = await api("/api/archive/boxes");
+  const tbody = document.querySelector("#boxes tbody");
+  tbody.innerHTML = "";
+  for (const b of data.items) {
+    row(tbody, [b.id, b.box_no, b.shelf_location, b.used_pages + "/" + b.capacity_pages, b.dossier_count]);
+  }
+}
+
+async function loadDossiers() {
+  const data = await api("/api/archive/dossiers" + ($("onlyOverdue").checked ? "?overdue=1" : ""));
+  const tbody = document.querySelector("#dossiers tbody");
+  tbody.innerHTML = "";
+  for (const d of data.items) {
+    const loan = d.active_loan || {};
+    const mark = d.overdue ? badge("逾期", "badge-overdue") : "";
+    row(tbody, [d.id, d.record_id, d.box_no, d.shelf_location, d.page_count, STATUS[d.status] || d.status,
+      loan.borrower_id || "", loan.purpose || "", loan.due_date || "", mark], d.overdue ? "overdue" : "");
+  }
+}
+
+async function loadRepairs() {
+  const data = await api("/api/archive/repairs");
+  const tbody = document.querySelector("#repairs tbody");
+  tbody.innerHTML = "";
+  for (const r of data.items) {
+    let action = "";
+    if (r.status === "pending") {
+      const btn = document.createElement("button");
+      btn.textContent = "补齐完成";
+      btn.onclick = async () => {
+        const note = prompt("修补说明（可空）", "") || "";
+        try { show(await post("/api/archive/repairs/" + r.id + "/actions/complete", {note})); await reload(); } catch (e) {}
+      };
+      action = btn;
+    }
+    row(tbody, [r.id, r.dossier_id, r.record_id, r.box_no, r.missing_pages, REPAIR_STATUS[r.status] || r.status, action]);
+  }
+}
+
+async function reload() {
+  try { await loadBoxes(); await loadDossiers(); await loadRepairs(); } catch (e) { /* 错误已显示在输出区 */ }
+}
+
+$("createBox").onclick = async () => {
+  try {
+    show(await post("/api/archive/boxes", {box_no: $("boxNo").value, shelf_location: $("shelf").value, capacity_pages: Number($("capacity").value)}));
+    await reload();
+  } catch (e) {}
+};
+$("archiveCase").onclick = async () => {
+  try {
+    show(await post("/api/archive/dossiers", {record_id: Number($("recId").value), box_id: Number($("boxId").value), page_count: Number($("pages").value)}));
+    await reload();
+  } catch (e) {}
+};
+$("borrow").onclick = async () => {
+  try {
+    show(await post("/api/archive/dossiers/" + $("borrowId").value + "/actions/borrow", {purpose: $("purpose").value, due_date: $("due").value}));
+    await reload();
+  } catch (e) {}
+};
+$("returnBack").onclick = async () => {
+  try {
+    show(await post("/api/archive/dossiers/" + $("returnId").value + "/actions/return", {missing_pages: Number($("missing").value)}));
+    await reload();
+  } catch (e) {}
+};
+$("reload").onclick = reload;
+$("onlyOverdue").onchange = loadDossiers;
+$("due").value = new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10);
+reload();
+</script>
+</body>
+</html>
